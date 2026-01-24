@@ -1,0 +1,226 @@
+version: '3.8'
+
+services:
+  # Nginx反向代理
+  nginx:
+    image: nginx:alpine
+    container_name: trading_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - trading_network
+
+  # 前端应用
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    container_name: trading_frontend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - REACT_APP_API_URL=/api
+      - REACT_APP_WS_URL=/ws
+    networks:
+      - trading_network
+
+  # 后端API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    container_name: trading_backend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - MONGODB_URI=mongodb://admin:${MONGODB_PASSWORD:-password123}@mongodb:27017/trading_platform?authSource=admin
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key}
+      - FRONTEND_URL=http://frontend:3000
+    volumes:
+      - backend_logs:/app/logs
+      - backend_uploads:/app/uploads
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - trading_network
+
+  # 交易引擎
+  trading-engine:
+    build:
+      context: ./trading-engine
+      dockerfile: Dockerfile
+    container_name: trading_engine
+    restart: unless-stopped
+    environment:
+      - PYTHONPATH=/app
+      - ENVIRONMENT=production
+      - PORT=8000
+      - MONGODB_URI=mongodb://admin:${MONGODB_PASSWORD:-password123}@mongodb:27017/trading_platform?authSource=admin
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - engine_logs:/app/logs
+      - engine_data:/app/data
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - trading_network
+
+  # MongoDB数据库
+  mongodb:
+    image: mongo:7.0
+    container_name: trading_mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD:-password123}
+      MONGO_INITDB_DATABASE: trading_platform
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - trading_network
+    command: mongod --auth
+
+  # Redis缓存
+  redis:
+    image: redis:7.2-alpine
+    container_name: trading_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - trading_network
+
+  # 监控服务 - Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: trading_prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - trading_network
+
+  # 监控面板 - Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: trading_grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin123}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - trading_network
+
+  # 日志收集 - Loki
+  loki:
+    image: grafana/loki:latest
+    container_name: trading_loki
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - trading_network
+
+  # 日志代理 - Promtail
+  promtail:
+    image: grafana/promtail:latest
+    container_name: trading_promtail
+    restart: unless-stopped
+    volumes:
+      - /var/log:/var/log:ro
+      - backend_logs:/var/log/backend:ro
+      - engine_logs:/var/log/engine:ro
+      - nginx_logs:/var/log/nginx:ro
+      - ./monitoring/promtail-config.yml:/etc/promtail/config.yml
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - trading_network
+
+  # 健康检查服务
+  healthcheck:
+    image: alpine:latest
+    container_name: trading_healthcheck
+    restart: unless-stopped
+    command: >
+      sh -c '
+        apk add --no-cache curl &&
+        while true; do
+          echo "[$(date)] Health check starting..."
+          curl -f http://backend:3001/health || echo "Backend unhealthy"
+          curl -f http://trading-engine:8000/health || echo "Trading engine unhealthy"
+          echo "[$(date)] Health check completed"
+          sleep 60
+        done
+      '
+    depends_on:
+      - backend
+      - trading-engine
+    networks:
+      - trading_network
+
+volumes:
+  mongodb_data:
+    driver: local
+  mongodb_config:
+    driver: local
+  redis_data:
+    driver: local
+  nginx_logs:
+    driver: local
+  backend_logs:
+    driver: local
+  backend_uploads:
+    driver: local
+  engine_logs:
+    driver: local
+  engine_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  loki_data:
+    driver: local
+
+networks:
+  trading_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

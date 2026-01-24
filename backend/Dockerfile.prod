@@ -1,0 +1,54 @@
+# Backend Production Dockerfile
+FROM node:18-alpine AS builder
+
+# 设置工作目录
+WORKDIR /app
+
+# 安装构建依赖
+RUN apk add --no-cache python3 make g++
+
+# 复制package文件
+COPY package*.json ./
+
+# 安装依赖
+RUN npm ci --only=production
+
+# 复制源代码
+COPY . .
+
+# 构建TypeScript
+RUN npm run build
+
+# 生产阶段
+FROM node:18-alpine
+
+# 创建应用用户
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S nodejs -u 1001
+
+# 设置工作目录
+WORKDIR /app
+
+# 安装运行时依赖
+RUN apk add --no-cache curl dumb-init
+
+# 复制构建文件和依赖
+COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
+COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
+
+# 创建必要目录
+RUN mkdir -p logs uploads && chown -R nodejs:nodejs logs uploads
+
+# 切换到非root用户
+USER nodejs
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:3001/health || exit 1
+
+# 暴露端口
+EXPOSE 3001
+
+# 启动应用
+CMD ["dumb-init", "node", "dist/server.js"]

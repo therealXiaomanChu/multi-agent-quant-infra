@@ -1,0 +1,123 @@
+version: '3.8'
+
+services:
+  # MongoDB数据库
+  mongodb:
+    image: mongo:7.0
+    container_name: trading_mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
+      MONGO_INITDB_DATABASE: trading_platform
+    volumes:
+      - mongodb_data:/data/db
+      - ./database/init:/docker-entrypoint-initdb.d
+    networks:
+      - trading_network
+
+  # Redis缓存
+  redis:
+    image: redis:7.2-alpine
+    container_name: trading_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - trading_network
+
+  # 后端API服务
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: trading_backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      MONGODB_URI: mongodb://admin:password123@mongodb:27017/trading_platform?authSource=admin
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: your-super-secret-jwt-key
+      ALPHA_VANTAGE_API_KEY: your-alpha-vantage-key
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    networks:
+      - trading_network
+
+  # 前端应用
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: trading_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:3001
+      REACT_APP_WS_URL: ws://localhost:3001
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - trading_network
+
+  # 交易引擎 (Python)
+  trading-engine:
+    build:
+      context: ./trading-engine
+      dockerfile: Dockerfile
+    container_name: trading_engine
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      PYTHONPATH: /app
+      MONGODB_URI: mongodb://admin:password123@mongodb:27017/trading_platform?authSource=admin
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./trading-engine:/app
+    networks:
+      - trading_network
+
+  # Nginx反向代理
+  nginx:
+    image: nginx:alpine
+    container_name: trading_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - trading_network
+
+volumes:
+  mongodb_data:
+  redis_data:
+
+networks:
+  trading_network:
+    driver: bridge
